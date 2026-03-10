@@ -1,19 +1,6 @@
-"""
-Simulation engine — orchestrates ray emission, tracing, and rendering.
-
-The Engine ties together the camera, ray emitter, trajectory solver,
-and lensing renderer into a single streamlined pipeline.
-
-Pipeline per frame:
-    1. For each pixel, compute ray direction from the camera.
-    2. Emit a photon along that direction.
-    3. Integrate the geodesic equation.
-    4. Determine photon fate (captured / escaped / hit disk).
-    5. Assign colour and write into the image buffer.
-"""
-
 import sys
 import time
+
 import numpy as np
 
 from core.camera import Camera
@@ -24,22 +11,6 @@ from physics.photon import PhotonFate
 
 
 class Engine:
-    """
-    Black-hole visualisation engine.
-
-    Parameters
-    ----------
-    M : float
-        Black hole mass in geometrised units (length).
-    camera : Camera
-        The observer's camera.
-    r_disk_outer : float
-        Outer radius of the accretion disk (multiples of M).
-    lambda_max : float
-        Maximum affine parameter for geodesic integration.
-    r_max : float
-        Escape radius.
-    """
 
     def __init__(
         self,
@@ -55,7 +26,6 @@ class Engine:
         self.r_max = r_max
 
         if camera is None:
-            # Default camera: positioned on the +x axis looking at the origin
             self.camera = Camera(
                 position=np.array([30.0, 0.0, 5.0]),
                 target=np.array([0.0, 0.0, 0.0]),
@@ -66,7 +36,6 @@ class Engine:
             self.camera = camera
 
     def trace_single_ray(self, i: int, j: int):
-        """Trace a single pixel (i, j) and return (i, j, photon)."""
         ray_dir = self.camera.ray_direction(i, j)
         photon = emit_ray(self.camera.position, ray_dir, self.M)
         solve_photon(
@@ -79,18 +48,6 @@ class Engine:
         return i, j, photon
 
     def render(self, progress: bool = True) -> np.ndarray:
-        """
-        Render the full image by tracing all pixels.
-
-        Parameters
-        ----------
-        progress : bool
-            Print a progress bar to stderr.
-
-        Returns
-        -------
-        (ny, nx, 3) float image array.
-        """
         nx, ny = self.camera.nx, self.camera.ny
         total = nx * ny
         traced = []
@@ -105,16 +62,15 @@ class Engine:
                 pct = 100.0 * (idx + 1) / total
                 elapsed = time.time() - t0
                 sys.stderr.write(
-                    f"\r  Tracing rays: {pct:5.1f}% "
-                    f"({idx+1}/{total})  [{elapsed:.1f}s]"
+                    f'\r  Tracing rays: {pct:5.1f}%'
+                    f' ({idx + 1}/{total})  [{elapsed:.1f}s]'
                 )
                 sys.stderr.flush()
 
         if progress:
             elapsed = time.time() - t0
             sys.stderr.write(
-                f"\r  Tracing rays: 100.0% "
-                f"({total}/{total})  [{elapsed:.1f}s]\n"
+                f'\r  Tracing rays: 100.0% ({total}/{total})  [{elapsed:.1f}s]\n'
             )
             sys.stderr.flush()
 
@@ -122,7 +78,6 @@ class Engine:
         return image
 
     def summary(self, photon_grid: list) -> dict:
-        """Return a count of photon fates for diagnostics."""
         counts = {f: 0 for f in PhotonFate}
         for _, _, p in photon_grid:
             counts[p.fate] += 1

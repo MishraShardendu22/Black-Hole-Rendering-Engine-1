@@ -1,20 +1,3 @@
-#!/usr/bin/env python3
-"""
-main.py — Schwarzschild Black Hole Visualisation Engine
-=======================================================
-
-Entry point that configures the camera, runs the ray-tracing engine,
-and saves the rendered output to  output/lensing_render.png.
-
-Usage:
-    python main.py [--resolution WxH] [--fov DEG] [--mass M]
-
-Examples:
-    python main.py                          # default 160×120 quick render
-    python main.py --resolution 320x240     # medium quality
-    python main.py --resolution 640x480     # high quality (slow)
-"""
-
 import argparse
 import os
 import sys
@@ -22,7 +5,7 @@ import time
 
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")  # non-interactive backend for saving images
+matplotlib.use('Agg')
 
 from core.camera import Camera
 from core.engine import Engine
@@ -31,35 +14,35 @@ from renderer.plot_renderer import show_render
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Schwarzschild black hole gravitational lensing renderer."
+        description='Schwarzschild black hole gravitational lensing renderer.'
     )
     parser.add_argument(
-        "--resolution", type=str, default="160x120",
-        help="Image resolution WxH (e.g. 320x240). Default: 160x120."
+        '--resolution', type=str, default='160x120',
+        help='Image resolution WxH (e.g. 320x240). Default: 160x120.'
     )
     parser.add_argument(
-        "--fov", type=float, default=60.0,
-        help="Horizontal field of view in degrees. Default: 60."
+        '--fov', type=float, default=60.0,
+        help='Horizontal field of view in degrees. Default: 60.'
     )
     parser.add_argument(
-        "--mass", type=float, default=1.0,
-        help="Black hole mass in geometrised units. Default: 1.0."
+        '--mass', type=float, default=1.0,
+        help='Black hole mass in geometrised units. Default: 1.0.'
     )
     parser.add_argument(
-        "--distance", type=float, default=30.0,
-        help="Camera distance from the black hole (units of M). Default: 30."
+        '--distance', type=float, default=30.0,
+        help='Camera distance from the black hole (units of M). Default: 30.'
     )
     parser.add_argument(
-        "--inclination", type=float, default=80.0,
-        help="Camera inclination angle in degrees from the pole. Default: 80."
+        '--inclination', type=float, default=80.0,
+        help='Camera inclination angle in degrees from the pole. Default: 80.'
     )
     parser.add_argument(
-        "--disk-outer", type=float, default=20.0,
-        help="Outer radius of accretion disk (units of M). Default: 20."
+        '--disk-outer', type=float, default=20.0,
+        help='Outer radius of accretion disk (units of M). Default: 20.'
     )
     parser.add_argument(
-        "--output", type=str, default="output/lensing_render.png",
-        help="Output file path. Default: output/lensing_render.png."
+        '--output', type=str, default='output/lensing_render.png',
+        help='Output file path. Default: output/lensing_render.png.'
     )
     return parser.parse_args()
 
@@ -68,14 +51,12 @@ def main():
     args = parse_args()
 
     try:
-        nx, ny = (int(x) for x in args.resolution.split("x"))
+        nx, ny = (int(x) for x in args.resolution.split('x'))
     except ValueError:
-        print("Error: resolution must be in WxH format (e.g. 320x240).")
+        print('Error: resolution must be in WxH format (e.g. 320x240).')
         sys.exit(1)
 
     M = args.mass
-
-    # Camera position from distance and inclination
     inc_rad = np.deg2rad(args.inclination)
     cam_pos = np.array([
         args.distance * np.sin(inc_rad),
@@ -99,37 +80,37 @@ def main():
         r_max=250.0,
     )
 
-    print(f"Schwarzschild Black Hole Renderer")
-    print(f"  Mass           : {M}")
-    print(f"  Resolution     : {nx} x {ny}")
-    print(f"  FoV            : {args.fov}°")
-    print(f"  Camera distance: {args.distance} M")
-    print(f"  Inclination    : {args.inclination}°")
-    print(f"  Disk outer     : {args.disk_outer} M")
-    print(f"  Output         : {args.output}")
+    print('Schwarzschild Black Hole Renderer')
+    print(f'  Mass           : {M}')
+    print(f'  Resolution     : {nx} x {ny}')
+    print(f'  FoV            : {args.fov}°')
+    print(f'  Camera distance: {args.distance} M')
+    print(f'  Inclination    : {args.inclination}°')
+    print(f'  Disk outer     : {args.disk_outer} M')
+    print(f'  Output         : {args.output}')
     print()
 
     t0 = time.time()
     image = engine.render(progress=True)
     elapsed = time.time() - t0
 
-    # Ensure output directory exists
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
 
-    # Save with matplotlib
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(10, 10 * ny / nx))
-    ax.imshow(image, origin="upper", interpolation="bilinear")
-    ax.set_title("Schwarzschild Black Hole — Gravitational Lensing",
-                 fontsize=14, color="white", pad=12)
-    ax.axis("off")
-    fig.patch.set_facecolor("black")
+    ax.imshow(image, origin='upper', interpolation='bilinear')
+    ax.set_title(
+        'Schwarzschild Black Hole — Gravitational Lensing',
+        fontsize=14, color='white', pad=12
+    )
+    ax.axis('off')
+    fig.patch.set_facecolor('black')
     fig.tight_layout()
-    fig.savefig(args.output, dpi=150, bbox_inches="tight", facecolor="black")
+    fig.savefig(args.output, dpi=150, bbox_inches='tight', facecolor='black')
     plt.close(fig)
 
-    print(f"\nDone in {elapsed:.1f}s — saved to {args.output}")
+    print(f'\nDone in {elapsed:.1f}s — saved to {args.output}')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
