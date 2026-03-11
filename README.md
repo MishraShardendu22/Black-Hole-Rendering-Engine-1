@@ -1,23 +1,41 @@
 # Hlack-Bole
 
-A physically accurate Schwarzschild black hole renderer built in Python. The engine numerically integrates photon geodesics in curved spacetime and produces gravitational lensing images, including the black hole shadow, accretion disk, and a procedural star field.
+> A physically accurate Schwarzschild black hole renderer with backward ray tracing, General Relativity geodesics, and a real-time interactive Go viewer.
 
 ![Lensing Render](output/lensing_render.png)
 
 ---
 
-## Overview
+## What Is This?
 
-This project simulates light propagation around a non-rotating black hole using General Relativity. For each pixel in the output image, a photon ray is traced backwards from the camera through curved spacetime. The trajectory is determined by the Schwarzschild geodesic equations, integrated numerically using RK45. The photon is then classified as either captured by the black hole, escaped to infinity, or intercepted by the accretion disk.
+Hlack-Bole simulates how light bends around a non-rotating (Schwarzschild) black hole. For every pixel in the output image, a photon is traced **backwards** from the camera through curved spacetime. Its trajectory is governed by the **Schwarzschild geodesic equations** and numerically integrated with RK45. The photon is then classified as one of three outcomes:
 
-**Physics model:** Schwarzschild metric in geometrised units (G = c = 1)
+| Fate | Visual result |
+|---|---|
+| **Captured** | Falls into the event horizon → black shadow |
+| **Escaped** | Reaches infinity → procedural star field |
+| **Hit disk** | Crosses the equatorial accretion disk → temperature-coloured glow |
 
-**Key effects rendered:**
-- Gravitational lensing of background stars
-- Black hole shadow (photon capture region)
-- Thin accretion disk with Novikov-Thorne temperature profile
-- Doppler-like azimuthal brightness variation on the disk
-- Gravitational redshift via radial brightness falloff
+The project has two independent implementations:
+
+- **Python** — batch offline renderer, outputs a PNG
+- **Go** — real-time interactive viewer (Ebiten) + shared library (`librender.so`) callable from Python via ctypes
+
+**Physics model:** Schwarzschild metric in geometrised units ($G = c = 1$)
+
+---
+
+## Features
+
+- Backward ray tracing through Schwarzschild curved spacetime
+- Schwarzschild geodesic ODE integration (Christoffel symbols, RK45 adaptive step)
+- Black hole shadow (photon capture cross-section)
+- Thin accretion disk with Novikov–Thorne temperature profile
+- Doppler-like azimuthal brightness variation across the disk
+- Gravitational redshift modelled via radial brightness falloff
+- Relativistic beaming toggle
+- Real-time interactive Go viewer — orbit the camera with keyboard controls
+- Optional Kerr spin parameter `a` (experimental)
 
 ---
 
@@ -25,27 +43,83 @@ This project simulates light propagation around a non-rotating black hole using 
 
 ```
 Hlack-Bole/
-├── main.py                      # Entry point and CLI
-├── requirements.txt
-├── output/
-│   └── lensing_render.png
+├── main.py                      # Python CLI entry point
+├── requirements.txt             # Python dependencies
+├── Makefile                     # Build targets
+├── librender.h / librender.so   # Generated: Go shared library
+├── hlack-bole-live              # Generated: interactive binary
+│
 ├── core/
 │   ├── camera.py                # Pinhole camera, ray direction computation
-│   └── engine.py                # Render loop orchestrator
+│   └── engine.py                # Render loop orchestrator (Python)
+│
 ├── physics/
-│   ├── schwarzschild.py         # Metric, radii, effective potential
-│   ├── geodesic.py              # Christoffel symbols, geodesic ODE
-│   └── photon.py                # Photon data model and fate enum
+│   ├── schwarzschild.py         # Metric functions, key radii (r_s, r_isco, r_ph)
+│   ├── geodesic.py              # Christoffel symbols + geodesic ODE RHS
+│   └── photon.py                # Photon data model and PhotonFate enum
+│
 ├── bh_math/
 │   ├── vectors.py               # Coordinate transforms, vector utilities
 │   └── integrator.py            # SciPy ODE wrapper
+│
 ├── simulation/
-│   ├── ray_emitter.py           # Camera-to-spherical photon initialisation
-│   └── trajectory_solver.py     # Geodesic integration, disk/horizon detection
-└── renderer/
-    ├── disk.py                  # Accretion disk colour model
-    ├── lensing_renderer.py      # Pixel colour assignment from photon fate
-    └── plot_renderer.py         # Matplotlib output and trajectory plots
+│   ├── ray_emitter.py           # Camera ray → spherical photon initial state
+│   └── trajectory_solver.py     # Geodesic integration + disk/horizon detection
+│
+├── renderer/
+│   ├── disk.py                  # Accretion disk colour and temperature model
+│   ├── lensing_renderer.py      # Per-pixel colour from photon fate
+│   └── plot_renderer.py         # Matplotlib PNG output
+│
+└── gocore/                      # Go implementation
+    ├── render.go                # C-exported RenderBatch / TracePixel (shared lib)
+    ├── go.mod
+    ├── bh_math/vectors.go
+    ├── core/engine.go           # Go render engine
+    ├── physics/
+    │   ├── geodesic.go
+    │   ├── schwarzschild.go
+    │   ├── kerr.go
+    │   └── photon.go
+    ├── renderer/
+    │   ├── disk.go
+    │   └── lensing.go
+    ├── simulation/solver.go
+    └── cmd/interactive/main.go  # Real-time Ebiten viewer
+```
+
+---
+
+## Prerequisites
+
+### Python renderer
+
+| Requirement | Version |
+|---|---|
+| Python | 3.11+ |
+| numpy | ≥ 1.24 |
+| scipy | ≥ 1.10 |
+| matplotlib | ≥ 3.7 |
+
+### Go interactive viewer / shared library
+
+| Requirement | Notes |
+|---|---|
+| Go | 1.21+ |
+| GCC | For CGo compilation |
+| X11 dev headers | `libx11-dev`, `libxrandr-dev`, `libxi-dev`, `libxcursor-dev`, `libxinerama-dev` |
+| libXxf86vm | `libxxf86vm-dev` (required by Ebiten/GLFW) |
+
+On Fedora/RHEL:
+```bash
+sudo dnf install libX11-devel libXrandr-devel libXi-devel libXcursor-devel \
+                 libXinerama-devel libXxf86vm-devel mesa-libGL-devel
+```
+
+On Ubuntu/Debian:
+```bash
+sudo apt install libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
+                 libxinerama-dev libxxf86vm-dev libgl1-mesa-dev
 ```
 
 ---
@@ -58,17 +132,11 @@ cd Hlack-Bole
 pip install -r requirements.txt
 ```
 
-**Requirements:** Python 3.11+
-
-```
-numpy>=1.24
-scipy>=1.10
-matplotlib>=3.7
-```
-
 ---
 
 ## Usage
+
+### Python — offline batch render
 
 ```bash
 # Quick render at default resolution (160×120)
@@ -80,23 +148,145 @@ python main.py --resolution 320x240
 # High quality
 python main.py --resolution 640x480
 
-# Custom camera setup
+# Custom camera and disk setup
 python main.py --resolution 320x240 --inclination 85 --distance 25 --disk-outer 18
+
+# Disable relativistic effects for comparison
+python main.py --redshift 0 --doppler 0 --beaming 0
 ```
 
-### CLI Options
+Output is saved to `output/lensing_render.png` by default.
+
+#### CLI Options
 
 | Flag | Default | Description |
 |---|---|---|
-| `--resolution` | `160x120` | Output image size (WxH) |
+| `--resolution` | `160x120` | Output image size `WxH` |
 | `--fov` | `60` | Horizontal field of view in degrees |
 | `--mass` | `1.0` | Black hole mass in geometrised units |
-| `--distance` | `30.0` | Camera distance from black hole (units of M) |
-| `--inclination` | `80.0` | Camera polar angle from the spin axis |
+| `--distance` | `30.0` | Camera distance from the black hole (units of M) |
+| `--inclination` | `80.0` | Camera polar angle from the spin axis (degrees) |
 | `--disk-outer` | `20.0` | Outer radius of accretion disk (units of M) |
 | `--output` | `output/lensing_render.png` | Output file path |
+| `--spin` | `0.0` | Kerr spin parameter `a` (0 ≤ a < M) |
+| `--redshift` | `1` | Enable gravitational redshift (0 or 1) |
+| `--doppler` | `1` | Enable relativistic Doppler shift (0 or 1) |
+| `--beaming` | `1` | Enable relativistic beaming (0 or 1) |
 
-Render time scales roughly as O(W × H). A 160×120 render completes in seconds; 640×480 takes several minutes on a single CPU core.
+> Render time scales as O(W × H). A 160×120 render completes in seconds; 640×480 takes several minutes on a single CPU core.
+
+---
+
+### Go — build targets
+
+```bash
+# Build the shared library (librender.so + librender.h)
+make build-go
+
+# Build the real-time interactive viewer
+make build-interactive
+
+# Run the Python renderer at 320×240
+make run
+
+# Launch the interactive Go viewer
+make run-interactive
+
+# Remove all build artefacts
+make clean
+```
+
+### Go interactive viewer controls
+
+| Key | Action |
+|---|---|
+| `W / S` | Increase / decrease camera distance |
+| `A / D` | Orbit camera azimuth |
+| `Q / E` | Change camera inclination |
+| `+ / -` | Zoom field of view |
+| `R` | Reset to defaults |
+| `P` | Save current frame as PNG |
+
+---
+
+## How It Works
+
+### Pipeline (per pixel)
+
+```
+Camera.ray_direction(i, j)
+        │
+        ▼
+emit_ray()   ← converts Cartesian ray to spherical initial state [r, θ, φ, ṙ, θ̇, φ̇]
+        │
+        ▼
+solve_photon()  ← RK45 integrates geodesic_rhs_3d() until horizon or escape
+        │
+        ├─ CAPTURED  → black pixel
+        ├─ HIT_DISK  → disk_color(r, φ, M)   ← Novikov–Thorne T(r) → RGB
+        └─ ESCAPED   → background_color(θ, φ) ← procedural star field
+```
+
+### Geodesic integration
+
+The ODE state vector is $y = [r, \theta, \phi, \dot{r}, \dot{\theta}, \dot{\phi}]$. The RHS evaluates the Schwarzschild Christoffel symbols $\Gamma^\mu_{\alpha\beta}$ at each step and enforces the null condition $g_{\mu\nu}\dot{x}^\mu\dot{x}^\nu = 0$ to derive $\dot{t}$.
+
+Terminal events stop integration early:
+- **Horizon event:** $r \leq 1.02 \, r_s$ (direction = −1)
+- **Escape event:** $r \geq r_\text{max}$ (direction = +1)
+
+Disk crossings are detected as sign changes in $\theta(\lambda) - \pi/2$, with the crossing radius linearly interpolated between steps.
+
+### Accretion disk colour model
+
+The disk temperature follows the **Novikov–Thorne thin-disk profile**:
+
+$$T(r) \propto r^{-3/4} \left(1 - \sqrt{\frac{r_\text{isco}}{r}}\right)^{1/4}$$
+
+This normalised temperature is mapped to RGB with a black-body–inspired colour ramp (dark orange → yellow → white). Doppler brightening applies a $\sin\phi$ modulation and a radial fade toward the outer edge.
+
+---
+
+## Architecture
+
+```
+┌──────────────────────────────────────┐
+│               main.py                │
+│         CLI parsing · entry          │
+└────────────────┬─────────────────────┘
+                 │
+     ┌───────────▼───────────┐
+     │         core/         │
+     │   Camera · Engine     │
+     └──────┬────────┬───────┘
+            │        │
+  ┌─────────▼──┐  ┌──▼─────────────────┐
+  │ simulation/│  │     renderer/      │
+  │ Ray Emitter│  │ LensingRenderer    │
+  │ Traj Solver│  │ DiskColorModel     │
+  └─────┬──────┘  │ PlotRenderer       │
+        │          └────────────────────┘
+  ┌─────▼──────┐
+  │  physics/  │
+  │Schwarzschild│
+  │  Geodesic  │
+  │   Photon   │
+  └─────┬──────┘
+        │
+  ┌─────▼──────┐
+  │  bh_math/  │
+  │ Vectors    │
+  │ Integrator │
+  └────────────┘
+```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full dependency graph and per-pixel execution sequence, and [EXPLANATION.md](EXPLANATION.md) for a file-by-file code walkthrough.
+
+---
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 

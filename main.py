@@ -44,6 +44,22 @@ def parse_args():
         '--output', type=str, default='output/lensing_render.png',
         help='Output file path. Default: output/lensing_render.png.'
     )
+    parser.add_argument(
+        '--spin', type=float, default=0.0,
+        help='Kerr spin parameter a (0 ≤ a < M). Default: 0.0 (Schwarzschild).'
+    )
+    parser.add_argument(
+        '--redshift', type=int, default=1, choices=[0, 1],
+        help='Enable gravitational redshift (0/1). Default: 1.'
+    )
+    parser.add_argument(
+        '--doppler', type=int, default=1, choices=[0, 1],
+        help='Enable relativistic Doppler shift (0/1). Default: 1.'
+    )
+    parser.add_argument(
+        '--beaming', type=int, default=1, choices=[0, 1],
+        help='Enable relativistic beaming (0/1). Default: 1.'
+    )
     return parser.parse_args()
 
 
@@ -78,15 +94,24 @@ def main():
         r_disk_outer=args.disk_outer,
         lambda_max=400.0,
         r_max=250.0,
+        spin=args.spin,
+        enable_redshift=bool(args.redshift),
+        enable_doppler=bool(args.doppler),
+        enable_beaming=bool(args.beaming),
     )
 
-    print('Schwarzschild Black Hole Renderer')
+    metric_name = 'Kerr' if args.spin > 0 else 'Schwarzschild'
+    print(f'{metric_name} Black Hole Renderer')
     print(f'  Mass           : {M}')
+    print(f'  Spin           : {args.spin}')
     print(f'  Resolution     : {nx} x {ny}')
     print(f'  FoV            : {args.fov}°')
     print(f'  Camera distance: {args.distance} M')
     print(f'  Inclination    : {args.inclination}°')
     print(f'  Disk outer     : {args.disk_outer} M')
+    print(f'  Redshift       : {"on" if args.redshift else "off"}')
+    print(f'  Doppler        : {"on" if args.doppler else "off"}')
+    print(f'  Beaming        : {"on" if args.beaming else "off"}')
     print(f'  Output         : {args.output}')
     print()
 
@@ -100,7 +125,7 @@ def main():
     fig, ax = plt.subplots(figsize=(10, 10 * ny / nx))
     ax.imshow(image, origin='upper', interpolation='bilinear')
     ax.set_title(
-        'Schwarzschild Black Hole — Gravitational Lensing',
+        f'{metric_name} Black Hole — Gravitational Lensing',
         fontsize=14, color='white', pad=12
     )
     ax.axis('off')
