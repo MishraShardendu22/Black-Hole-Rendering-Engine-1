@@ -2,301 +2,566 @@
 
 ## What Is This Project?
 
-This is a **Schwarzschild black hole gravitational lensing renderer** written in pure Python. It simulates how light (photons) bends around a non-rotating black hole and produces an image showing:
+**Hlack-Bole** is a physically accurate black hole gravitational lensing renderer. It ray-traces photons through curved spacetime using General Relativity and produces images showing the visual distortion of light around a black hole. It supports both **Schwarzschild** (non-rotating) and **Kerr** (rotating) black holes, and includes a real-time interactive viewer.
 
-- The **black hole shadow** (the dark region where photons are captured)
-- A thin **accretion disk** (hot orbiting matter glowing around the black hole)
-- A **star-field background** visible through gravitationally lensed light
-- **Doppler-like brightness variation** on the disk
+Rendered features:
 
-The physics uses General Relativity — specifically the **Schwarzschild metric** in geometrised units ($G = c = 1$).
+- The **black hole shadow** (dark region where photons are captured by the event horizon)
+- A thin **accretion disk** using the Novikov-Thorne temperature profile
+- A **procedural star-field background** seen through gravitationally lensed light
+- **Relativistic effects** on the disk: gravitational redshift, Doppler shift, relativistic beaming
 
----
-
-## High-Level Pipeline
-
-```
-main.py  →  Camera  →  Engine  →  (per pixel) Ray Emitter  →  Trajectory Solver  →  Lensing Renderer  →  PNG
-```
-
-For every pixel in the output image:
-
-1. The **Camera** computes a ray direction.
-2. The **Ray Emitter** converts that direction into a photon with initial position/velocity in spherical coordinates.
-3. The **Trajectory Solver** numerically integrates the geodesic equation (Einstein's equations for light paths) using SciPy's ODE solver.
-4. The photon's **fate** is determined: captured by the black hole, escaped to infinity, or hit the accretion disk.
-5. The **Lensing Renderer** assigns an RGB colour based on that fate.
-6. The assembled image is saved to disk.
+All physics uses geometrised units ($G = c = 1$).
 
 ---
 
-## File-by-File Breakdown
+## Repository Layout
 
-### `main.py` — Entry Point
+```
+Hlack-Bole/
+├── main.py                        # Python CLI entry point
+├── Makefile                       # Build rules for Go shared library and interactive viewer
+├── librender.so                   # Compiled Go shared library (loaded by Python via ctypes)
+├── hlack-bole-live                # Compiled interactive viewer binary
+│
+├── core/                          # Python orchestration layer
+│   ├── camera.py                  # Pinhole camera model
+│   └── engine.py                  # Render engine (Go-first, Python fallback)
+│
+├── bh_math/                       # Shared math utilities (Python)
+│   ├── vectors.py                 # Coordinate conversions, vector ops
+│   └── integrator.py              # scipy.integrate.solve_ivp wrapper
+│
+├── physics/                       # Physics layer (Python)
+│   ├── schwarzschild.py           # Metric components, horizon/ISCO radii
+│   ├── geodesic.py                # Christoffel symbols, geodesic ODE
+│   └── photon.py                  # Photon data model + fate enum
+│
+├── simulation/                    # Simulation layer (Python)
+│   ├── ray_emitter.py             # Camera ray → photon initial state
+│   └── trajectory_solver.py      # ODE integration + fate detection
+│
+├── renderer/                      # Rendering layer (Python)
+│   ├── disk.py                    # Accretion disk colour model
+│   ├── lensing_renderer.py        # Per-pixel colour dispatch
+│   └── plot_renderer.py           # Matplotlib display utilities
+│
+└── gocore/                        # Go implementation (fast parallel engine)
+    ├── render.go                  # CGo export: RenderBatch, TracePixel
+    ├── go.mod
+    ├── bh_math/
+    │   └── vectors.go             # Vector/coordinate math (Go)
+    ├── core/
+    │   └── engine.go              # Goroutine worker pool
+    ├── physics/
+    │   ├── photon.go              # Photon struct + fate enum
+    │   ├── schwarzschild.go       # Schwarzschild metric functions
+    │   ├── kerr.go                # Kerr metric + geodesic RHS
+    │   └── geodesic.go            # Schwarzschild geodesic ODE
+    ├── renderer/
+    │   ├── disk.go                # Disk colour with relativistic effects
+    │   └── lensing.go             # Star-field + pixel colour dispatch
+    ├── simulation/
+    │   └── solver.go              # Hand-rolled adaptive RK45 (Dormand-Prince)
+    └── cmd/interactive/
+        └── main.go                # Real-time Ebiten viewer
+```
 
-- Parses command-line arguments: resolution, field of view, black hole mass, camera distance/inclination, disk size, output path.
-- Computes camera position from distance and inclination angle.
-- Creates a `Camera` and `Engine` instance.
-- Calls `engine.render()` which traces all rays and returns an image array.
-- Saves the final image to `output/lensing_render.png` via matplotlib.
+---
+
+## Two Execution Paths
+
+The project has two parallel implementations that produce identical output:
+
+| | Python | Go (`gocore/`) |
+|---|---|---|
+| ODE solver | `scipy.integrate.solve_ivp` | Hand-rolled Dormand-Prince RK45 |
+| Parallelism | Single-threaded | Goroutine worker pool (`runtime.GOMAXPROCS`) |
+| Entry point | `main.py` + `core/engine.py` | `librender.so` (ctypes) or `hlack-bole-live` |
+| Relativity | Schwarzschild only | Schwarzschild + Kerr |
+| Speed | Slow (seconds per frame) | Fast (milliseconds per frame) |
+
+**How they connect:** `core/engine.py` attempts to load `librender.so` at startup via `ctypes`. If found, it delegates all rendering to Go. If not found, it falls back to pure Python. The Python layer only handles argument parsing, camera setup, and file I/O.
+
+---
+
+## High-Level Pipeline (per pixel)
+
+```
+Camera pixel (i,j)
+       │
+       ▼  ray_direction(i,j) → unit vector in Cartesian 3D
+Camera model
+       │
+       ▼  Cartesian pos + dir → spherical (r, θ, φ, ṙ, θ̇, φ̇)
+Ray Emitter
+       │
+       ▼  Integrate geodesic ODE forward in affine parameter λ
+Trajectory Solver (RK45)
+       │    ├─ Terminates: r ≤ r_s×1.02  → CAPTURED  → black pixel
+       │    ├─ Terminates: r ≥ r_max     → ESCAPED   → star-field colour
+       │    └─ θ crosses π/2 in [r_isco, r_disk]  → HIT_DISK → disk colour
+       │
+       ▼
+Colour assignment
+       │  CAPTURED  → [0, 0, 0]
+       │  ESCAPED   → procedural star-field based on exit (θ, φ)
+       │  HIT_DISK  → Novikov-Thorne temperature → RGB × relativistic factors
+       ▼
+RGB pixel → assembled image → PNG
+```
+
+---
+
+## Python Layer — File-by-File
+
+### `main.py` — CLI Entry Point
+
+- Parses command-line arguments: resolution, FOV, black hole mass, camera distance/inclination, disk outer radius, spin parameter, and toggle flags for redshift/Doppler/beaming.
+- Computes the camera position in Cartesian 3D from `distance` and `inclination` using spherical-to-Cartesian conversion.
+- Constructs a `Camera` and an `Engine`, then calls `engine.render()` which returns a float32 RGB image array.
+- Saves the result to a PNG via matplotlib with a black background.
 
 **Key CLI flags:**
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--resolution` | `160x120` | Image width x height |
+| `--resolution` | `160x120` | Image width × height |
 | `--fov` | `60` | Horizontal field of view (degrees) |
-| `--mass` | `1.0` | Black hole mass in geometrised units |
-| `--distance` | `30.0` | Camera distance from the black hole |
-| `--inclination` | `80.0` | Camera angle from the pole (degrees) |
-| `--disk-outer` | `20.0` | Outer radius of the accretion disk |
+| `--mass` | `1.0` | Black hole mass $M$ in geometrised units |
+| `--distance` | `30.0` | Camera distance from black hole (units of $M$) |
+| `--inclination` | `80.0` | Camera angle from pole (degrees) |
+| `--spin` | `0.0` | Kerr spin parameter $a$ ($0 \leq a < M$) |
+| `--disk-outer` | `20.0` | Outer radius of accretion disk |
+| `--redshift` | `1` | Enable gravitational redshift |
+| `--doppler` | `1` | Enable relativistic Doppler shift |
+| `--beaming` | `1` | Enable relativistic beaming |
 | `--output` | `output/lensing_render.png` | Output file path |
 
 ---
 
-### `core/camera.py` — Pinhole Camera Model
+### `core/camera.py` — Pinhole Camera
 
-Defines a **pinhole camera** in 3D Cartesian space.
+Defines a pinhole camera in 3D Cartesian space.
 
-- **Inputs:** position, look-at target, up-vector hint, field of view, resolution.
-- On construction, computes an **orthonormal basis** (`forward`, `right`, `up`) from the position/target/up-hint using cross products.
-- `ray_direction(i, j)` — For pixel at row `i`, column `j`, computes the unit-length 3D direction vector of the ray leaving the camera through that pixel. Uses half-pixel offsets for uniform sampling and accounts for field of view and aspect ratio.
+- On construction, builds an orthonormal basis: `forward = normalize(target - position)`, `right = normalize(forward × up_hint)`, `up = right × forward`.
+- `ray_direction(i, j)` — Maps pixel `(i, j)` to a unit-vector ray direction. Uses half-pixel offsets (`(j + 0.5) / nx` etc.) for uniform coverage. Accounts for FOV and aspect ratio.
 
----
-
-### `core/engine.py` — Simulation Engine (Orchestrator)
-
-The **central coordinator** that ties all modules together.
-
-- **`trace_single_ray(i, j)`** — For one pixel: gets the ray direction from the camera, emits a photon, integrates its trajectory, and returns the result.
-- **`render(progress=True)`** — Iterates over every pixel in the image, traces a ray for each, prints a progress bar to stderr, then calls `render_image()` to convert the traced photons into an RGB array.
-- **`summary()`** — Diagnostic utility that counts how many photons were captured, escaped, or hit the disk.
+$$\text{dir} = \text{forward} + u \cdot \tan(\text{fov}/2) \cdot \text{right} + v \cdot \frac{\tan(\text{fov}/2)}{\text{aspect}} \cdot \text{up}$$
 
 ---
 
-### `physics/schwarzschild.py` — Schwarzschild Metric & Constants
+### `core/engine.py` — Render Engine (Orchestrator)
 
-Contains all the **core physics formulas** for a Schwarzschild (non-rotating) black hole:
+The central coordinator. Attempts to use the Go shared library (`librender.so`) first; falls back to pure Python if it is not available.
+
+- **`_load_go_lib()`** — Loads `librender.so` with ctypes, sets argument/return types for `RenderBatch` and `TracePixel`.
+- **`_build_photon_array()`** — Iterates all pixels, computes each ray direction from the camera, converts the Cartesian position+direction to spherical coordinates, and packs everything into a flat `(n_pixels × 6)` float64 array.
+- **`_render_go(lib, progress)`** — Passes the photon array to `lib.RenderBatch` in one call; receives a flat `(n × 3)` float32 RGB array back. Reshapes it to `(ny, nx, 3)`.
+- **`_render_python(progress)`** — Single-threaded fallback: calls `trace_single_ray` for every pixel, accumulates results, then calls `render_image`.
+- **`render()`** — Selects Go or Python path automatically.
+- **`summary(photon_grid)`** — Counts fate distribution across all traced photons.
+
+---
+
+### `physics/schwarzschild.py` — Schwarzschild Metric
+
+Physics formulas for a non-rotating black hole:
 
 | Function | Formula | Purpose |
 |----------|---------|---------|
-| `schwarzschild_radius(M)` | $r_s = 2M$ | Event horizon radius |
-| `photon_sphere_radius(M)` | $r_{ph} = 3M$ | Unstable circular photon orbit |
-| `isco_radius(M)` | $r_{isco} = 6M$ | Innermost stable circular orbit (inner disk edge) |
-| `metric_tt`, `metric_rr`, `metric_thth`, `metric_phph` | Schwarzschild metric components $g_{\mu\nu}$ | Used by geodesic equations |
-| `effective_potential(r, M, L)` | $V_{eff}(r) = (1 - 2M/r) \cdot L^2 / r^2$ | Determines photon turning points |
-| `critical_impact_parameter(M)` | $b_c = 3\sqrt{3} \cdot M$ | Impact parameter below which photons are captured |
-
-Also includes SI constants (`G`, `c`, `M_sun`) for potential unit conversions.
+| `schwarzschild_radius(M)` | $r_s = 2M$ | Event horizon |
+| `photon_sphere_radius(M)` | $r_{ph} = 3M$ | Unstable photon circular orbit |
+| `isco_radius(M)` | $r_{isco} = 6M$ | Inner edge of accretion disk |
+| `metric_tt(r, M)` | $g_{tt} = -(1 - 2M/r)$ | Time metric component |
+| `metric_rr(r, M)` | $g_{rr} = (1 - 2M/r)^{-1}$ | Radial metric component |
+| `metric_thth(r)` | $g_{\theta\theta} = r^2$ | Polar metric component |
+| `metric_phph(r, θ)` | $g_{\phi\phi} = r^2\sin^2\theta$ | Azimuthal metric component |
+| `effective_potential(r, M, L)` | $V_{eff} = (1 - 2M/r) \cdot L^2/r^2$ | Photon turning points |
+| `critical_impact_parameter(M)` | $b_c = 3\sqrt{3}\,M$ | Capture threshold |
 
 ---
 
-### `physics/geodesic.py` — Geodesic Equation (Equations of Motion)
+### `physics/geodesic.py` — Geodesic ODE (Python)
 
-Implements the **geodesic equation** — the differential equation governing how photons move through curved spacetime.
+Implements the Schwarzschild geodesic equation.
 
-- **Christoffel symbols:** The non-zero Christoffel symbols $\Gamma^{\mu}_{\alpha\beta}$ for the Schwarzschild metric are computed in `christoffel_r()`, `christoffel_theta()`, and `christoffel_phi()`. These encode how spacetime curvature deflects light.
-- **`geodesic_rhs_full()`** — Full 8-component ODE right-hand side: $\frac{d}{d\lambda}[t, r, \theta, \phi, \dot{t}, \dot{r}, \dot{\theta}, \dot{\phi}]$. Includes the time coordinate.
-- **`geodesic_rhs_3d()`** — Simplified 6-component version (drops `t`). Reconstructs $dt/d\lambda$ from the **null condition** ($ds^2 = 0$, meaning the particle is a photon). This is the version actually used by the solver.
+**Christoffel symbols** (non-zero components, equatorial-generalised):
 
-Both functions return zeros inside the horizon ($r \leq r_s \times 1.01$) to prevent numerical blowup at the singularity.
+- `christoffel_r()` — $\ddot{r}$ contributions from $\Gamma^r_{\mu\nu}$
+- `christoffel_theta()` — $\ddot{\theta}$ contributions from $\Gamma^\theta_{\mu\nu}$
+- `christoffel_phi()` — $\ddot{\phi}$ contributions from $\Gamma^\phi_{\mu\nu}$
+
+**`geodesic_rhs_3d(lam, state, M)`** — Used by the solver. State is $[r, \theta, \phi, \dot{r}, \dot{\theta}, \dot{\phi}]$. Drops the time coordinate and reconstructs $\dot{t}$ from the null condition:
+
+$$\dot{t} = \sqrt{\frac{\dot{r}^2/f + r^2\dot{\theta}^2 + r^2\sin^2\theta\,\dot{\phi}^2}{f}}, \quad f = 1 - \frac{2M}{r}$$
+
+Returns `np.zeros(6)` when $r \leq 1.01\, r_s$ to stop integration cleanly at the horizon.
 
 ---
 
 ### `physics/photon.py` — Photon Data Model
 
-Defines the data structures for a single photon:
+**`PhotonFate`** enum:
 
-- **`PhotonFate`** (enum) — Four possible outcomes:
-  - `ESCAPED` — photon reached the escape radius
-  - `CAPTURED` — photon fell into the event horizon
-  - `HIT_DISK` — photon intersected the accretion disk
-  - `IN_FLIGHT` — still being traced
+| Value | Meaning |
+|-------|---------|
+| `ESCAPED` | Photon reached $r_{max}$ — draws background star |
+| `CAPTURED` | Photon crossed event horizon — black pixel |
+| `HIT_DISK` | Photon crossed equatorial plane inside disk radii |
+| `IN_FLIGHT` | Integration still running |
 
-- **`Photon`** class — Stores:
-  - Initial spherical coordinates and velocities ($r, \theta, \phi, \dot{r}, \dot{\theta}, \dot{\phi}$)
-  - Trajectory arrays (recorded during integration)
-  - Fate, colour, and brightness
-  - `initial_state` property returns the 6-element state vector for the ODE solver
-  - `endpoint_cartesian()` converts the final trajectory point back to Cartesian
+**`Photon`** class holds: initial state $(r_0, \theta_0, \phi_0, \dot{r}_0, \dot{\theta}_0, \dot{\phi}_0)$, trajectory arrays, fate, disk hit position (`disk_r`, `disk_phi`), colour, and brightness.
 
 ---
 
-### `bh_math/vectors.py` — Vector Utilities
-
-Pure math helper functions:
+### `bh_math/vectors.py` — Vector / Coordinate Utilities
 
 | Function | Purpose |
 |----------|---------|
-| `normalize(v)` | Returns unit vector |
+| `normalize(v)` | Unit vector |
 | `magnitude(v)` | Euclidean norm |
-| `cartesian_to_spherical(x, y, z)` | $(x,y,z) \to (r, \theta, \phi)$ |
-| `spherical_to_cartesian(r, θ, φ)` | $(r, \theta, \phi) \to (x, y, z)$ |
-| `cartesian_velocity_to_spherical(pos, vel)` | Transforms velocity from Cartesian to spherical using the Jacobian |
-| `rotation_matrix_y(angle)` | 3×3 rotation about Y axis |
-| `rotation_matrix_x(angle)` | 3×3 rotation about X axis |
+| `cartesian_to_spherical(x, y, z)` | $(x,y,z) \to (r,\theta,\phi)$ using `arccos`, `arctan2` |
+| `spherical_to_cartesian(r, θ, φ)` | Inverse transform |
+| `cartesian_velocity_to_spherical(pos, vel)` | Jacobian transform of velocity vector |
+| `rotation_matrix_y(angle)` | 3×3 Y-axis rotation |
+| `rotation_matrix_x(angle)` | 3×3 X-axis rotation |
 
-The velocity transformation is critical — the camera works in Cartesian coordinates, but the geodesic solver works in spherical coordinates.
+The velocity Jacobian transform is essential: the camera generates ray directions in Cartesian space, but the geodesic ODE integrates in spherical space.
 
 ---
 
-### `bh_math/integrator.py` — ODE Integration Wrapper
+### `bh_math/integrator.py` — scipy Wrapper
 
-A thin wrapper around `scipy.integrate.solve_ivp`:
-
-- **`integrate_geodesic()`** — Calls SciPy's RK45 (Runge-Kutta 4th/5th order) solver with configurable tolerances, max step size, and event functions.
-- Returns a dictionary with the solution arrays, success status, and event times.
-
-> **Note:** The trajectory solver (`trajectory_solver.py`) calls `solve_ivp` directly rather than going through this wrapper — the wrapper exists as a reusable utility.
+A reusable wrapper around `scipy.integrate.solve_ivp`. Calls RK45 with configurable tolerances, max step, event functions, and dense output. Returns a plain `dict` instead of the scipy solution object. The trajectory solver calls `solve_ivp` directly, but this utility exists for standalone use.
 
 ---
 
 ### `simulation/ray_emitter.py` — Ray Emission
 
-Converts camera-space rays into initial photon states:
-
-- **`emit_ray(cam_pos, ray_dir, M)`** — Takes a Cartesian camera position and ray direction, converts them to spherical coordinates using the vector utilities, and returns a `Photon` object ready for integration. The affine parameter freedom is used to set the speed to 1.
-- **`emit_ray_grid()`** — Batch version that generates photons for every pixel in a grid (an alternative to the per-pixel approach used by the engine).
+- **`emit_ray(cam_pos, ray_dir, M)`** — Converts Cartesian camera position and normalised ray direction into a `Photon` with spherical initial state. Speed is set to 1 (affine parameter freedom).
+- **`emit_ray_grid(...)`** — Batch convenience function that generates all photons for a full pixel grid in one call.
 
 ---
 
-### `simulation/trajectory_solver.py` — Geodesic Integration & Fate Detection
+### `simulation/trajectory_solver.py` — Integration & Fate Detection
 
-The core numerical engine that traces each photon:
-
-- **`_make_events(M, r_max)`** — Creates two terminal event functions for the ODE solver:
-  1. **Horizon event** — triggers when $r \leq r_s \times 1.02$ (photon captured)
-  2. **Escape event** — triggers when $r > r_{max}$ (photon escaped)
-
-- **`_check_disk_crossing()`** — After integration, scans the trajectory for **equatorial plane crossings** ($\theta$ passing through $\pi/2$). If the crossing radius falls within $[r_{isco}, r_{disk\_outer}]$, the photon hit the accretion disk. Uses linear interpolation to find the exact crossing point.
-
-- **`solve_photon(photon, M, ...)`** — The main function:
-  1. Calls `solve_ivp` with the geodesic RHS and event functions.
-  2. Stores the trajectory on the photon.
-  3. Determines fate from which event triggered (or if lambda was exhausted).
-  4. Checks for disk crossings if the photon wasn't captured.
-  5. Returns the mutated photon with `.fate`, `.disk_r`, `.disk_phi` set.
+- **`_make_events(M, r_max)`** — Two terminal event callbacks for `solve_ivp`:
+  - `horizon_event`: $r - 1.02\,r_s = 0$, fires when photon reaches the horizon
+  - `escape_event`: $r - r_{max} = 0$, fires when photon escapes
+- **`_check_disk_crossing(r, θ, φ, M, r_{disk})`** — Scans consecutive trajectory steps for a sign change in $\theta - \pi/2$. When found, linearly interpolates to the exact equatorial crossing and checks if the radius is inside $[r_{isco}, r_{disk\_outer}]$.
+- **`solve_photon(photon, M, ...)`** — Main function:
+  1. Calls `solve_ivp` (RK45, rtol=1e-8, atol=1e-10)
+  2. Stores trajectory arrays on the photon
+  3. Sets `fate` from which event fired (or guesses from final $r$ if lambda exhausted)
+  4. If not captured, checks for disk crossing and sets `disk_r`, `disk_phi`
 
 ---
 
-### `renderer/disk.py` — Accretion Disk Colour Model
+### `renderer/disk.py` — Accretion Disk Colour (Python)
 
-Computes the visual appearance of the accretion disk using a simplified **Novikov-Thorne** thin-disk model:
+Implements a simplified **Novikov-Thorne** thin-disk colour model.
 
-- **`disk_temperature_profile(r, M)`** — Temperature follows $T(r) \propto r^{-3/4} [1 - \sqrt{r_{isco}/r}]^{1/4}$, normalised to a peak value of 1.
-- **`temperature_to_rgb(t)`** — Maps normalised temperature to RGB using a **hot-metal palette**: cool → dark red/orange, hot → bright yellow/white.
-- **`disk_color(r, phi, M, r_disk_outer)`** — Combines temperature, a Doppler-like azimuthal brightness variation ($1 + 0.4 \sin\phi$, simulating the approaching/receding sides of the orbiting disk), and a radial fade. Returns a final RGB colour.
+- **`disk_temperature_profile(r, M)`** — Normalised temperature:
 
----
+$$T_{norm}(r) = \frac{r^{-3/4}\left(1 - \sqrt{r_{isco}/r}\right)^{1/4}}{T_{peak}}$$
 
-### `renderer/lensing_renderer.py` — Pixel Colour Assignment
+- **`temperature_to_rgb(t)`** — Hot-metal colour ramp: cool → red, warm → orange/yellow, hot → white.
 
-Maps photon fates to final pixel colours:
+$$R = \text{clip}(1.5t), \quad G = \text{clip}(1.5t - 0.4), \quad B = \text{clip}(2t - 1.2)$$
 
-- **`background_color(θ, φ)`** — Procedural star field for escaped photons. Uses a deterministic pseudo-random function based on exit angles to sprinkle bright stars (~0.8% of pixels) on a very dark blue background.
-- **`compute_pixel_color(photon, M, r_disk_outer)`** — Dispatches based on fate:
-  - `CAPTURED` → black (the shadow)
-  - `HIT_DISK` → colour from `disk_color()`
-  - `ESCAPED` → `background_color()` based on exit direction
-- **`render_image(photon_grid, nx, ny, M, r_disk_outer)`** — Loops over all traced photons and assembles the full `(ny, nx, 3)` RGB image array.
+- **`disk_color(r, φ, M, r_{disk})`** — Applies azimuthal Doppler modulation ($1 + 0.4\sin\phi$) and a radial brightness fade, returning the final RGB.
 
 ---
 
-### `renderer/plot_renderer.py` — Matplotlib Visualisation
+### `renderer/lensing_renderer.py` — Pixel Colour Dispatch
 
-Plotting utilities for display and diagnostics:
+- **`background_color(θ, φ)`** — Deterministic pseudo-random star field. Computes `seed = |sin(127.1θ + 311.7φ)| × 43758 mod 1000`. Seeds < 8 (~0.8% of directions) are drawn as white-ish stars; the rest are near-black space.
+- **`compute_pixel_color(photon, M, r_disk)`** — Routes by fate: black for captured, disk colour for disk hits, star field for escaped.
+- **`render_image(...)`** — Assembles `(ny, nx, 3)` float64 image from a list of `(i, j, photon)` tuples.
 
-- **`show_render(image, ...)`** — Displays the final lensing image with a dark background; optionally saves to file.
-- **`plot_trajectories(photons, M, ...)`** — Plots photon paths in the x-z plane, colour-coded by fate (green=escaped, red=captured, yellow=hit disk). Draws reference circles for the event horizon, photon sphere, and ISCO.
-- **`plot_effective_potential(M, ...)`** — Plots the effective potential $V_{eff}(r)$ for various impact parameters, illustrating which photons get captured vs. deflected.
+---
+
+### `renderer/plot_renderer.py` — Matplotlib Utilities
+
+- **`show_render(image, ...)`** — Displays the rendered image with a black background; optional file save.
+- **`plot_trajectories(photons, M, ...)`** — Overlays projected photon paths on a 2D plane, coloured by fate. Draws event horizon, photon sphere, and ISCO circles.
+- **`plot_effective_potential(M, ...)`** — Plots $V_{eff}(r)$ curves for multiple impact parameters to visualise the capture threshold.
+
+---
+
+## Go Layer (`gocore/`) — File-by-File
+
+The Go layer is a fully self-contained implementation of the same physics. It compiles to either:
+
+- `librender.so` — a shared library loaded by Python via ctypes
+- `hlack-bole-live` — a standalone interactive viewer
+
+---
+
+### `render.go` — CGo Export Layer
+
+The bridge between Python and Go. Exports two C-callable functions via CGo:
+
+- **`RenderBatch(photons, nPixels, mass, spin, ...)`** — Accepts a flat array of `n × 6` photon initial states from Python, dispatches to `core.RenderBatch`, writes `n × 3` float32 RGB results back.
+- **`TracePixel(r, θ, φ, ṙ, θ̇, φ̇, mass, spin, ...)`** — Traces a single photon and returns three float32 pointers (R, G, B). Useful for debugging.
+
+`main()` is empty — required by Go for `c-shared` build mode.
+
+---
+
+### `gocore/core/engine.go` — Goroutine Worker Pool
+
+- **`RenderBatch(photons, nPixels, params, outRGB)`** — Creates `runtime.GOMAXPROCS(0)` goroutines. Each goroutine pulls pixel indices from a buffered channel, creates a `Photon`, calls `SolvePhoton`, then `ComputePixelColor`, and writes RGB into the shared output slice. Uses `sync.WaitGroup` for completion.
+- **`TraceOnePixel(state, params)`** — Single-pixel convenience for the interactive viewer.
+
+No locks needed on `outRGB` because each goroutine writes to a disjoint index range.
+
+---
+
+### `gocore/bh_math/vectors.go` — Vector & Coordinate Math (Go)
+
+Mirrors `bh_math/vectors.py` exactly. All functions operate on `[3]float64` arrays:
+
+| Function | Purpose |
+|----------|---------|
+| `Normalize(v)` | Unit vector |
+| `Magnitude(v)` | Euclidean length |
+| `CartesianToSpherical(x,y,z)` | $(x,y,z) \to (r,\theta,\phi)$ |
+| `SphericalToCartesian(r,θ,φ)` | Inverse |
+| `CartesianVelocityToSpherical(pos, vel)` | Jacobian velocity transform |
+| `Cross(a, b)` | 3D cross product |
+| `Dot(a, b)` | Dot product |
+| `Scale(v, s)` | Scalar multiply |
+| `Add(a, b)`, `Sub(a, b)` | Vector addition/subtraction |
+
+Used by the interactive viewer (`main.go`) to build the camera basis and photon array.
+
+---
+
+### `gocore/physics/photon.go` — Photon Struct
+
+```go
+type PhotonFate int   // Escaped, Captured, HitDisk, InFlight
+
+type Photon struct {
+    R0, Theta0, Phi0    float64  // initial position (spherical)
+    DR0, DTheta0, DPhi0 float64  // initial velocities
+    TrajectoryR/Theta/Phi []float64
+    Fate         PhotonFate
+    DiskR, DiskPhi, DiskThetaDot float64
+    Brightness   float64
+    Color        [3]float32
+}
+```
+
+`NewPhoton(r, θ, φ, ṙ, θ̇, φ̇)` creates a photon with `Fate = InFlight`.
+
+---
+
+### `gocore/physics/schwarzschild.go` — Schwarzschild Functions (Go)
+
+Go equivalents of `physics/schwarzschild.py`:
+
+- `SchwarzschildRadius(M)`, `PhotonSphereRadius(M)`, `ISCORadius(M)`
+- `MetricTT`, `MetricRR`, `MetricThTh`, `MetricPhPh`
+- `EffectivePotential(r, M, L)`, `CriticalImpactParameter(M)`
+
+---
+
+### `gocore/physics/geodesic.go` — Schwarzschild Geodesic (Go)
+
+Go equivalent of `physics/geodesic.py`:
+
+- `ChristoffelR`, `ChristoffelTheta`, `ChristoffelPhi` — same formulas as Python versions
+- `GeodesicRHS3D(lam, state, M)` — 6-component ODE RHS, reconstructs $\dot{t}$ from null condition
+
+---
+
+### `gocore/physics/kerr.go` — Kerr Metric & Geodesic
+
+Implements the full **Kerr metric** in Boyer-Lindquist coordinates for rotating black holes. This is absent in the Python layer.
+
+**Key quantities:**
+
+$$\Sigma = r^2 + a^2\cos^2\theta, \quad \Delta = r^2 - 2Mr + a^2$$
+
+$$r_+ = M + \sqrt{M^2 - a^2} \quad \text{(event horizon)}$$
+
+Helper functions: `KerrSigma`, `KerrDelta`, `KerrEventHorizon`, `KerrISCO` (prograde ISCO using the Bardeen formula), and all 5 Boyer-Lindquist metric components.
+
+**`GeodesicRHSKerr(lam, state, M, a)`** — Computes the geodesic acceleration using the Euler-Lagrange equations for the Kerr Lagrangian $\mathcal{L} = \frac{1}{2}g_{\mu\nu}\dot{x}^\mu\dot{x}^\nu = 0$:
+
+1. Reconstructs $\dot{t}$ by solving the null-condition quadratic in $\dot{t}$
+2. Computes all metric partial derivatives ($\partial_r g_{\mu\nu}$, $\partial_\theta g_{\mu\nu}$) analytically
+3. Applies the Euler-Lagrange formula for $\ddot{r}$ and $\ddot{\theta}$
+4. Solves the 2×2 linear system for $\ddot{t}$ and $\ddot{\phi}$ from the conserved energy and angular momentum equations
+
+**`GeodesicRHS(lam, state, M, a)`** — Dispatcher: calls `GeodesicRHS3D` when $a = 0$ (Schwarzschild), else `GeodesicRHSKerr`.
+
+---
+
+### `gocore/simulation/solver.go` — Adaptive RK45 (Dormand-Prince)
+
+A hand-rolled **Dormand-Prince RK45** integrator — no external dependencies. This gives total control over step-size adaptation and event detection, which `scipy.solve_ivp` handles internally in Python.
+
+**Dormand-Prince coefficients** (`dpA`, `dpB5`, `dpE`) are hardcoded as the standard Butcher tableau.
+
+**`rk45step(f, lam, y, h)`** — Computes one RK45 step: evaluates $f$ at 7 internal stages and returns both the 5th-order solution `y5` and the embedded 4th-order `y4` for error estimation.
+
+**`errorNorm(y4, y5, atol, rtol)`** — Computes the mixed absolute/relative error norm per component; step is accepted when error ≤ 1.
+
+**`SolvePhoton(photon, params)`** — Main integration loop:
+
+1. Advances with adaptive step size
+2. After each accepted step, checks three event functions:
+   - `horizonEvent`: $r$ crossed below $1.02 r_+$ → `Captured`
+   - `escapeEvent`: $r$ exceeded $r_{max}$ → `Escaped`
+   - `diskCrossingEvent`: $\theta$ crossed $\pi/2$ → possible `HitDisk`
+3. When a disk crossing is detected, **bisects** the interval (60 iterations) to precisely locate the equatorial crossing point and records `DiskR`, `DiskPhi`, `DiskThetaDot`
+4. Step size is scaled by $0.9 \cdot \text{err}^{-0.2}$, clamped to $[0.2,\, 5] \times h$
+
+---
+
+### `gocore/renderer/disk.go` — Disk Colour with Relativistic Effects
+
+Implements the Novikov-Thorne disk colour model plus three optional relativistic corrections:
+
+- **`DiskTemperatureProfile(r, M)`** — Same formula as Python: $r^{-3/4}(1 - \sqrt{r_{in}/r})^{1/4}$, normalised at peak
+- **`TemperatureToRGB(t)`** — Hot-metal ramp, matching Python
+- **`GravitationalRedshift(r, M)`** — $z_{grav} = \sqrt{1 - r_s/r}$ — light loses energy climbing out of the gravity well; disk appears cooler/dimmer from far away
+- **`KeplerianOmega(r, M)`** — $\Omega = \sqrt{M/r^3}$ — orbital angular velocity of disk matter
+- **`DopplerFactor(r, φ, M)`** — Full relativistic Doppler:
+
+$$v = \frac{\Omega r}{\sqrt{1 - r_s/r}}, \quad \gamma = \frac{1}{\sqrt{1-v^2}}, \quad D = \frac{1}{\gamma(1 - v\cos\phi)}$$
+
+- **`DiskColorRelativistic(...)`** — Combines all effects:
+
+$$\text{brightness} = z_{grav} \cdot D^3 \cdot T_{norm} \cdot \text{radialFade}$$
+
+  where $D^3$ accounts for: one factor from photon energy shift, one from photon rate, one from solid-angle beaming (relativistic beaming). Each effect is independently togglable.
+
+---
+
+### `gocore/renderer/lensing.go` — Pixel Colour Dispatch (Go)
+
+Go equivalent of `renderer/lensing_renderer.py`:
+
+- **`BackgroundColor(θ, φ)`** — Identical pseudo-random star field formula as Python
+- **`ComputePixelColor(photon, params)`** — Returns black for captured, disk colour (relativistic) for disk hits, star field for escaped photons
+
+---
+
+### `gocore/cmd/interactive/main.go` — Real-Time Interactive Viewer
+
+A live OpenGL-backed viewer using the **Ebiten** game engine (`github.com/hajimehoshi/ebiten/v2`).
+
+**Render resolution:** 160×120 internally, scaled up 5× to 800×600 for display. This keeps frame time low enough for interactive use.
+
+**`Game` struct** — holds all adjustable parameters:
+
+| Field | Controlled by | Effect |
+|-------|---------------|--------|
+| `distance` | W / S keys | Camera orbital radius |
+| `inclination` | ↑ / ↓ arrow keys | Camera polar angle |
+| `azimuth` | ← / → arrow keys | Camera azimuthal angle |
+| `fov` | `=` / `-` keys | Field of view |
+| `spin` | A / D keys | Kerr spin parameter $a$ |
+
+**`Update()`** — Called every tick (~60 Hz). Reads keyboard state and updates parameters.
+
+**`Draw(screen)`** — Called every frame:
+
+1. Calls `buildPhotonArray(renderW, renderH)` to recompute all photon initial states from the current camera position
+2. Calls `core.RenderBatch(...)` — the same Go worker pool used by the Python ctypes path
+3. Converts the float32 RGB pixels to `color.RGBA` and uploads to an Ebiten image
+4. Draws the image scaled up with nearest-neighbour filtering (intentionally pixelated look)
+5. Overlays FPS and camera parameters via `ebitenutil.DebugPrint`
+
+**`saveHighRes()`** — Triggered by pressing `R`. Runs asynchronously (goroutine), renders at 640×480, and saves to `output/render_<unix_timestamp>.png`.
+
+**`buildPhotonArray(nx, ny)`** — Mirrors `Engine._build_photon_array` in Python: builds the camera basis from `distance`, `inclination`, `azimuth`, then iterates all pixels.
 
 ---
 
 ## Physics Summary
 
-| Concept | Value | Meaning |
-|---------|-------|---------|
-| Schwarzschild radius | $r_s = 2M$ | Event horizon — nothing escapes |
-| Photon sphere | $r_{ph} = 3M$ | Unstable circular photon orbits |
-| ISCO | $r_{isco} = 6M$ | Inner edge of stable orbits / accretion disk |
-| Critical impact parameter | $b_c = 3\sqrt{3}M \approx 5.2M$ | Photons with $b < b_c$ are captured |
-| Geodesic equation | $\frac{d^2 x^\mu}{d\lambda^2} = -\Gamma^\mu_{\alpha\beta} \frac{dx^\alpha}{d\lambda}\frac{dx^\beta}{d\lambda}$ | Equation of motion in curved spacetime |
-| Null condition | $g_{\mu\nu} \frac{dx^\mu}{d\lambda}\frac{dx^\nu}{d\lambda} = 0$ | Constraint for massless particles (photons) |
+| Quantity | Schwarzschild ($a=0$) | Kerr ($a > 0$) |
+|----------|-----------------------|----------------|
+| Event horizon | $r_s = 2M$ | $r_+ = M + \sqrt{M^2 - a^2}$ |
+| Photon sphere | $r_{ph} = 3M$ | More complex, dependent on $a$ |
+| ISCO | $r_{isco} = 6M$ | $r_{isco}(a)$ — shrinks as $a \to M$ |
+| Critical impact param | $b_c = 3\sqrt{3}\,M$ | Changes with $a$ |
+| Metric | Diagonal, 4 components | 5 components + $g_{t\phi}$ off-diagonal |
+| Frame-dragging | None | Yes — $g_{t\phi}$ couples $t$ and $\phi$ |
+
+The geodesic equation in both cases:
+
+$$\frac{d^2 x^\mu}{d\lambda^2} = -\Gamma^\mu_{\alpha\beta} \frac{dx^\alpha}{d\lambda}\frac{dx^\beta}{d\lambda}$$
+
+For photons, the null condition $g_{\mu\nu}\dot{x}^\mu\dot{x}^\nu = 0$ provides one constraint, allowing $\dot{t}$ to be reconstructed from the remaining coordinates and eliminating it from the ODE state.
 
 ---
 
-## Data Flow Diagram
+## Build System
 
 ```
-┌──────────┐     ray_direction(i,j)     ┌─────────────┐
-│  Camera   │ ─────────────────────────► │ Ray Emitter  │
-│ (camera.py)│   Cartesian unit vector   │(ray_emitter.py)│
-└──────────┘                             └──────┬───────┘
-                                                │  Photon (spherical coords)
-                                                ▼
-                                        ┌───────────────┐
-                                        │  Trajectory    │
-                                        │  Solver        │
-                                        │(trajectory_    │
-                                        │ solver.py)     │
-                                        └──────┬────────┘
-                                               │  geodesic_rhs_3d()
-                                               │  ┌──────────────┐
-                                               ├──│ Geodesic Eqs │
-                                               │  │ (geodesic.py)│
-                                               │  └──────────────┘
-                                               │  Christoffel symbols
-                                               │  ┌────────────────┐
-                                               ├──│ Schwarzschild  │
-                                               │  │(schwarzschild. │
-                                               │  │ py)            │
-                                               │  └────────────────┘
-                                               │
-                                               ▼
-                                        fate: CAPTURED / ESCAPED / HIT_DISK
-                                               │
-                                               ▼
-                                        ┌───────────────┐
-                                        │ Lensing       │     ┌──────────┐
-                                        │ Renderer      │────►│ Disk     │
-                                        │(lensing_      │     │(disk.py) │
-                                        │ renderer.py)  │     └──────────┘
-                                        └──────┬────────┘
-                                               │  RGB pixel
-                                               ▼
-                                        ┌───────────────┐
-                                        │  Plot Renderer│ ──► output/lensing_render.png
-                                        │(plot_renderer │
-                                        │ .py)          │
-                                        └───────────────┘
+make build-go         # Compiles librender.so (Python ctypes target)
+make build-interactive  # Compiles hlack-bole-live (Ebiten viewer)
+make build-all        # Both
 ```
+
+The interactive build requires X11 development libraries (`libX11`, `libXrandr`, `libXi`, `libXcursor`, `libXinerama`). On Fedora: `sudo dnf install libX11-devel libXrandr-devel libXi-devel libXcursor-devel libXinerama-devel`.
+
+Note: `libXxf86vm` is a legacy library. If the linker cannot find it, install `libXxf86vm-devel` or add `-tags noopengl` to the build flags.
 
 ---
 
 ## Dependencies
 
-| Library | Version | Purpose |
-|---------|---------|---------|
-| numpy | ≥ 1.24 | Array math, linear algebra |
-| scipy | ≥ 1.10 | ODE solver (`solve_ivp` with RK45) |
-| matplotlib | ≥ 3.7 | Image rendering and plotting |
+**Python:**
+
+| Library | Purpose |
+|---------|---------|
+| `numpy` | Array math |
+| `scipy` | ODE solver (`solve_ivp`, RK45) |
+| `matplotlib` | Image saving and trajectory plots |
+
+**Go:**
+
+| Module | Purpose |
+|--------|---------|
+| `github.com/hajimehoshi/ebiten/v2` | Real-time interactive window (interactive viewer only) |
+| Standard library only | Everything else (`math`, `sync`, `runtime`, `image`, etc.) |
 
 ---
 
 ## How To Run
 
 ```bash
-# Quick low-res render (default 160×120)
+# Default 160×120 render (auto-uses Go engine if librender.so is present)
 python main.py
 
 # Medium quality
 python main.py --resolution 320x240
 
-# High quality (slower)
-python main.py --resolution 640x480
+# High quality with Kerr black hole (spin a=0.9)
+python main.py --resolution 640x480 --spin 0.9 --inclination 75
 
-# Custom camera angle and disk size
-python main.py --resolution 320x240 --inclination 85 --disk-outer 25
+# Force edge-on view with large disk
+python main.py --resolution 320x240 --inclination 90 --disk-outer 30
+
+# Interactive real-time viewer (requires build-interactive)
+./hlack-bole-live
 ```
 
-Output is saved to `output/lensing_render.png` by default.
+Controls for the interactive viewer:
+
+| Key | Action |
+|-----|--------|
+| ↑ / ↓ | Orbit camera up/down (inclination) |
+| ← / → | Orbit camera left/right (azimuth) |
+| W / S | Zoom in/out (camera distance) |
+| A / D | Decrease/increase Kerr spin $a$ |
+| = / - | Narrow/widen field of view |
+| R | Save 640×480 PNG to `output/` |
