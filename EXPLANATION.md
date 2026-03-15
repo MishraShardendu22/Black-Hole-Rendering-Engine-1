@@ -1,4 +1,4 @@
-# Hlack-Bole — Full Codebase Explanation
+# Hlack-Bole — Full Codebase Explanation (https://www.youtube.com/watch?v=FS8NotZ3diY)
 
 ## What Is This Project?
 
